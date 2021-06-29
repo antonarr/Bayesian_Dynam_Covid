@@ -1,0 +1,981 @@
+---
+title: "Bayesian_Dynam_Covid"
+author: "antonio"
+date: "29/06/2021"
+output: html_document
+---
+
+---
+title: "review_1"
+author: "antonio"
+date: "26/05/2021"
+output: html_document
+---
+
+```{r, cache = TRUE}
+library(goldfish)
+library(coda)
+library(sna)
+library(fitR)
+```
+
+
+## Bayesian estimation for the Social Evolution dataset.
+
+Before going to define the priors the likelihood and the posteriors I need to compute the significant statistics for our model. These are all the relevant information used in our estimation scheme deriving from the data.  
+The Indegree statistics, counts the times a connection is generated from sender $i$ in a given timeperiod. 
+
+The Indegree statistic can be computed by using the library(sna) where the function degree is used. To apply such a function I have to consider the Network at each time point given by a matrix (n_senders*n_receivers) where each tie (i,j) indicates the number of connections between sender i and receiver j up until the time point in consideration. 
+```{r, cache = TRUE}
+#The function that can be applied to each Network.goldfish after extracting the unique_times
+
+Indegree <- function(Network,unique_times,error){
+  Indegree_prova <- data.frame(matrix(0,nrow = dim(Network)[1]))
+  for (i in (unique_times+error)){
+    a<-  sna::degree(as.matrix(Network, time = i), cmode = "indegree")
+    Indegree_prova[,paste0("time ",i)] <- a
+  }
+  Indegree_prova <- Indegree_prova[,-1]
+  return(Indegree_prova)
+}
+
+#Compute the Indegree for the 
+
+```
+
+
+Before moving to defining the likelihood I insert the Outdegree statistic calculation. To do so I have to compute the Outdegree as done for the Indegree by using sna package.
+
+
+```{r, cache = TRUE}
+Outdegree <- function(Network,unique_times,error){
+  Outdegree_prova <- data.frame(matrix(0,nrow = dim(Network)[1]))
+  for (i in (unique_times+error)){
+    a<-  sna::degree(as.matrix(Network, time = i), cmode = "outdegree")
+    Outdegree_prova[,paste0("time ",i)] <- a
+  }
+  Outdegree_prova <- Outdegree_prova[,-1]
+  return(Outdegree_prova)
+}
+
+
+```
+
+## LIKELIHOOD 
+
+Here the function for the likelihood defined for the rate submodel 
+
+
+```{r, cache=TRUE}
+    ratesums <- c()
+    timestamp <- c()
+    singleLikelihoods <- c()
+likelihood <- function(beta0,beta1,beta2, beta3){
+    objectiveFunctions <- beta0 + beta1*Indeg +beta2*Outdeg +beta3*Outdeg2 #link function for each object in Indegree,     where per each time has 210 (n_actors) values indicating the indegree of each sender at each time. 
+    rates <- exp(objectiveFunctions) #exponential link function
+    ActiveObjective <- which(Outdeg[,1] == 1) #the current active sender
+    ratesums[1] <- sum(rates[,1]) #sum of all the senders link functions at any given event_time 
+    timestamp[1] <- unique_times[1] #the timespan 
+    singleLikelihoods[1] <- sum(beta0 + beta1*Indeg[ActiveObjective,1]+beta2*Outdeg[ActiveObjective,1] +beta3*Outdeg2[,1] ) - timestamp[1]*ratesums[1] #likelihood for first event
+    for (j in 2:length(unique_times)){ #iterate the above for each event sequence
+      ActiveObjective <- which(Outdeg[,j] - Outdeg[,j-1] == 1)
+      ratesums[j] <- sum(rates[,j]) #These numbers are too big, but I tried everythink mathematically f      for me are ok. But as the likelihood iterates the numbers become too large (10^58). I cannot find      the mistake **PROBLEM**
+      timestamp[j] <- (unique_times[j] - unique_times[j-1])
+      singleLikelihoods[j] <- sum(beta0+beta1*Outdeg[ActiveObjective,j] + beta2*Outdeg[ActiveObjective,j] + beta3*Outdeg2[,j]) - timestamp[j]*ratesums[j]
+    }
+    logL <- sum(singleLikelihoods)
+    return(logL)
+}
+
+```
+
+
+Here the sampler function for the MCMC. I operate with logarithms hence everythink is related to it. 
+
+```{r cache=TRUE}
+
+sampler <- function(niter, 
+                      beta0startval, beta1startval, beta2startval, beta3startval,
+                      beta0proposalsd, beta1proposalsd, beta2proposalsd, beta3proposalsd) {
+  beta0 <- rep(0,niter) 
+  beta1 <- rep(0,niter)
+  beta2 <- rep(0,niter) 
+  beta3 <- rep(0,niter)
+  beta0[1] <- beta0startval
+  beta1[1] <- beta1startval
+  beta2[1] <- beta2startval
+  beta3[1] <- beta3startval
+  
+  for (i in 2:niter) {
+    currentbeta0 <- beta0[i - 1] #define the current parameter value
+    currentbeta1 <- beta1[i - 1]
+    currentbeta2 <- beta2[i - 1] 
+    currentbeta3 <- beta3[i - 1] 
+    
+    newbeta0 <- currentbeta0 + rnorm(1, 0, beta0proposalsd) #take the new parameter value according to a normal(0,parametersd) which is symmetric and hence cancels out in the acceptance ratio
+    A <- min(((dnorm(newbeta0,-10,4, log = T) + likelihood(newbeta0,currentbeta1,currentbeta2,currentbeta3)) -
+      (dnorm(currentbeta0,-10,4, log=T) + likelihood(currentbeta0,currentbeta1,currentbeta2,currentbeta3))),0) #acceptance ratio
+    
+    if (log(runif(1)) < A) {
+      beta0[i] <- newbeta0
+    } else {
+      beta0[i] <- currentbeta0
+    } #accept new value if simulated value of the uniform is smaller than the acceptance ratio otherwise reject.
+    newbeta1 <- currentbeta1 + rnorm(1, 0, beta1proposalsd) #same procedure for beta1, taking the above defined beta0.
+    
+    A <- min(((dnorm(newbeta1,0,5, log = T) + likelihood(beta0[i],newbeta1,currentbeta2,currentbeta3)) - 
+      (dnorm(currentbeta1,0,5, log = T) + likelihood(beta0[i],currentbeta1,currentbeta2,currentbeta3))),0)
+    
+    if (log(runif(1)) < A) {
+      beta1[i] <- newbeta1
+    } else {
+      beta1[i] <- currentbeta1
+    }
+  
+    
+    newbeta2 <- currentbeta2 + rnorm(1, 0, beta2proposalsd) 
+    
+    A <- min(((dnorm(newbeta2,0,6, log = T) + likelihood(beta0[i],beta1[i],newbeta2,currentbeta3)) - 
+        (dnorm(currentbeta2,0,6, log = T) + likelihood(beta0[i],beta1[i],currentbeta2,currentbeta3))),0)
+      
+    if (log(runif(1)) < A) {
+      beta2[i] <- newbeta2
+    } else {
+      beta2[i] <- currentbeta2
+    }
+
+    newbeta3 <- currentbeta3 + rnorm(1, 0, beta3proposalsd) 
+      
+  A <- min(((dnorm(newbeta3,0,5, log = T) + likelihood(beta0[i],beta1[i],beta2[i],newbeta3)) - 
+        (dnorm(currentbeta3,0,5, log = T) + likelihood(beta0[i],beta1[i],beta2[i],currentbeta3))),0)
+      
+    if (log(runif(1)) < A) {
+      beta3[i] <- newbeta3
+    } else {
+      beta3[i] <- currentbeta3
+    }
+  }
+    
+  
+  return(list(beta0 = beta0, beta1 = beta1, beta2=beta2, beta3=beta3)) # return a "list" with two elements named beta0 and beta1
+}
+
+```
+
+
+here the Social_Evolution dataset. 
+It is a dataset composed of 84 different nodes and 439 connections that indicate the call done among different students (the nodes). A second network of friendships has 766 observations with 84 nodes. 
+
+
+```{r, cache = TRUE}
+data("Social_Evolution")
+actors<-defineNodes(nodes = actors) #the nodes of our model
+
+call.Network <- defineNetwork(nodes = actors, directed = TRUE) #first netwrok (calls)
+call.Network <- linkEvents(x = call.Network, changeEvent = calls, nodes = actors)
+callsDependent<-defineDependentEvents(events=calls, nodes=actors,
+                             defaultNetwork = call.Network)
+
+friendship.Network <- defineNetwork(nodes=actors, directed = TRUE) #second network (friendships)
+friendship.Network <- linkEvents(x=friendship.Network, changeEvent = friendship, nodes = actors)
+friendshipDependent<-defineDependentEvents(events=friendship, nodes=actors,
+                             defaultNetwork = friendship.Network)
+
+```
+
+
+
+### RATE SUBMODEL
+
+To run the M-H algorithm I have to define the unique_times of the network, define the nodes as 'nodi' and the calls dataset as 'collegamenti' and lastly compute the binary projection of the network per each single timepoint, defined as lists above. From there I can compute the Indegree and the Outegree sufficient statistics matrices. 
+
+```{r, cache = TRUE}
+#Definition of variables necessary for running the MCMC estimation
+unique_times <- unique(calls$time)
+unique_times_friend <- unique(friendship$time)
+
+Indeg_Social <- Indegree(call.Network,unique_times,0.01)
+Outdeg_Social <- Outdegree(call.Network,unique_times,0.01)
+Outdeg_friend <- Outdegree(friendship.Network,unique_times, 0.01)
+Indeg_Social <- as.matrix(Indeg_Social)
+Outdeg_Social <- as.matrix(Outdeg_Social)
+Outdeg_friend <- as.matrix(Outdeg_friend)
+Indeg <- Indeg_Social
+Outdeg <- Outdeg_Social
+Outdeg2 <- Outdeg_friend
+
+Outdeg2[,1]
+```
+
+
+## SOCIAL, RATE, INTERCEPT + INDEGREE + OUTDEGREE + FRIENDSHIP
+
+```{r, cache = TRUE}
+#run the algorithm. As before I run already it and saved it.
+
+Social_friendship<- sampler(30000,-5,0,0,0,0.01,0.0007,0.0007,0.002)
+
+#SocialEvolution_MH <- readRDS("C:/Users/anton/Documents/Bologna/Tesi_estero/10000iter_object_rate_SocialEvolution.RData")
+```
+
+```{r, cache= TRUE}
+
+trace_SocialEvolution <- matrix(unlist(Social_friendship,use.names = FALSE),ncol=4, dimnames = list(NULL,c('beta0', 'beta1','beta2','beta3')))
+
+trace_SocialEvolution <- as.mcmc(trace_SocialEvolution)
+
+#summary of the results
+summary(trace_SocialEvolution)
+
+#acceptance rate
+acceptanceRate_SocialEvolution <- 1 - rejectionRate(trace_SocialEvolution)
+acceptanceRate_SocialEvolution
+
+effectiveSize(trace_SocialEvolution)
+
+plot(trace_SocialEvolution)
+autocorr.plot(trace_SocialEvolution)
+
+par(mfrow = c(1,3))
+hist(Social_friendship$beta0,prob = T, col = "dark grey",
+     main = "beta 0 sample", xlab = "posterior estimate")
+hist(Social_friendship$beta1, prob = T, col = "dark grey",
+     main = "beta 1 sample", xlab = "posterior estimate")
+hist(Social_friendship$beta2, prob = T, col = "dark grey",
+     main = "beta 2 sample", xlab = "posterior estimate")
+hist(Social_friendship$beta3, prob = T, col = "dark grey",
+     main = "beta 3 sample", xlab = "posterior estimate")
+
+trace_SocialEvolution_burned <- burnAndThin(trace_SocialEvolution, burn = 3000)
+plot(trace_SocialEvolution_burned)
+```
+
+
+###Move to submodel = Choice
+
+The choice model needs a definition of a new likelihood as proposed by Snijders et al. and a new algorithm for the sampler
+
+Before defining them, I decided also to include the Inertia, which basically tells how likely a connection is made given that it has already occurred in the past.
+Here the computation of the inertia.
+Moreover I introduce the Homophily of the friendship dataset, which has the same computation of the Inertia for a covariate network (friendship).
+
+```{r, cache = TRUE}
+Inertia <- function(Network,unique_times, error){
+  Inertia_prova <- list()
+  for (i in (unique_times+error)){
+    a<-  as.matrix(Network, time = i) 
+    Inertia_prova[[paste0("time ",i)]] <- a 
+  }
+  return(Inertia_prova)
+}
+
+Inertia_calls<- Inertia(call.Network,unique_times,0.0000000001)
+Ine <- Inertia_calls
+Inertia_friendship <- Inertia(friendship.Network,unique_times,0.000000001)
+Ine2 <- Inertia_friendship
+```
+
+
+First I compute the likelihood for the model without Inertia.
+
+Here the likelihood for choice model.
+
+### choice with inertia, outdeg, indeg, floor, friendship
+
+```{r}
+utility_log <- c()
+denominator_log <- c()
+singlelikelihoods_choice <- c()
+likelihood_choice_withFloor <- function(theta1,theta2,theta3,theta4,theta5){
+  ActiveReceiver <- which(Indeg[,1]  == 1)
+  ActiveSender <- which(Outdeg[,1]  == 1)
+  utility_log[1] <- theta1*Outdeg[ActiveReceiver,1] + theta2*Indeg[ActiveReceiver,1] +theta3*Ine[[1]][ActiveSender,ActiveReceiver] +theta4*(actors$floor[ActiveReceiver] == actors$floor[ActiveSender]) + theta5*Ine2[[1]][ActiveSender,ActiveReceiver] #the inertia as the number of i->j and j->i connections are in place among the active dyad.
+  denominator_log[1] <- log(sum(exp(theta1*Outdeg[-ActiveSender,1] + theta2*Indeg[                                                                                    -ActiveSender,1] +theta3*Ine[[1]][ActiveSender,-ActiveSender] + theta4*(actors$floor[ActiveSender] == actors$floor[-ActiveSender]) + theta5*Ine2[[1]][ActiveSender,-ActiveSender]))) #here inertia is summed among the activesender and all the receivers but himself.
+  singlelikelihoods_choice[1] <- utility_log[1] - denominator_log[1]
+  for (j in 2:length(unique_times)){
+    ActiveReceiver <- which(Indeg[,j] - Indeg[,j-1] == 1)
+    ActiveSender <- which(Outdeg[,j] - Outdeg[,j-1] == 1)
+    utility_log[j] <- theta1*Outdeg[ActiveReceiver,j] + theta2*Indeg[ActiveReceiver,j] +theta3*Ine[[j]][ActiveSender,ActiveReceiver] + theta4*(actors$floor[ActiveSender] == actors$floor[ActiveReceiver]) +theta5*Ine2[[j]][ActiveSender,ActiveReceiver]
+    denominator_log[j] <- log(sum(exp(theta1*Outdeg[-ActiveSender,j] + theta2*Indeg[-ActiveSender,j]+theta3*Ine[[j]][ActiveSender,-ActiveSender] + theta4*(actors$floor[ActiveSender] == actors$floor[-ActiveSender]) +theta5*Ine2[[j]][ActiveSender,-ActiveSender])))
+    singlelikelihoods_choice[j] <- utility_log[j] - denominator_log[j]
+  }
+  logL_choice <- sum(singlelikelihoods_choice)
+  return(logL_choice)
+}
+
+
+
+sampler_choice_withFloor <- function(niter, theta1startval, theta2startval, theta3startval,theta4startval, theta5startval, theta1proposalsd,theta2proposalsd, theta3proposalsd, theta4proposalsd, theta5proposalsd){
+  theta1 <- rep(0,niter)
+  theta2 <- rep(0,niter)
+  theta3 <- rep(0,niter)
+  theta4 <- rep(0,niter)
+  theta5 <- rep(0,niter)
+  theta1[1] <- theta1startval
+  theta2[1] <- theta2startval
+  theta3[1] <- theta3startval
+  theta4[1] <- theta4startval
+  theta5[1] <- theta5startval
+
+  for (i in 2:niter) {
+    currenttheta1 <- theta1[i - 1]
+    currenttheta2 <- theta2[i - 1]
+    currenttheta3 <- theta3[i - 1]
+    currenttheta4 <- theta4[i - 1]
+    currenttheta5 <- theta5[i - 1]
+
+    newtheta1 <- currenttheta1 + rnorm(1, 0, theta1proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta1,0,4, log = T) + likelihood_choice_withFloor(newtheta1,currenttheta2,currenttheta3,currenttheta4,currenttheta5))-(dnorm(currenttheta1,0,4, log=T) + likelihood_choice_withFloor(currenttheta1,currenttheta2,currenttheta3,currenttheta4,currenttheta5))),0)) {
+      theta1[i] <- newtheta1
+    } else {
+      theta1[i] <- currenttheta1
+    }
+    newtheta2 <- currenttheta2 + rnorm(1, 0, theta2proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta2,0,4, log = T) + likelihood_choice_withFloor(theta1[i],newtheta2,currenttheta3,currenttheta4,currenttheta5)) -(dnorm(currenttheta2,0,4, log = T) + likelihood_choice_withFloor(theta1[i],currenttheta2,currenttheta3,currenttheta4,currenttheta5))),0)) {
+      theta2[i] <- newtheta2
+    } else {
+      theta2[i] <- currenttheta2
+    }
+
+    newtheta3 <- currenttheta3 + rnorm(1, 0, theta3proposalsd)
+    
+     if (log(runif(1)) < min(((dnorm(newtheta3,0,4, log = T) + likelihood_choice_withFloor(theta1[i],theta2[i],newtheta3,currenttheta4,currenttheta5)) -(dnorm(currenttheta3,0,4, log = T) + likelihood_choice_withFloor(theta1[i],theta2[i],currenttheta3,currenttheta4,currenttheta5))),0)) {
+       theta3[i] <- newtheta3
+     } else {
+       theta3[i] <- currenttheta3
+     }
+
+      newtheta4 <- currenttheta4 + rnorm(1, 0, theta4proposalsd)
+    
+     if (log(runif(1)) < min(((dnorm(newtheta4,0,4, log = T) + likelihood_choice_withFloor(theta1[i],theta2[i],theta3[i],newtheta4,currenttheta5)) -(dnorm(currenttheta4,0,4, log = T) + likelihood_choice_withFloor(theta1[i],theta2[i],theta3[i],currenttheta4,currenttheta5))),0)) {
+       theta4[i] <- newtheta4
+     } else {
+       theta4[i] <- currenttheta4
+     }
+      
+      newtheta5 <- currenttheta5 + rnorm(1, 0, theta5proposalsd)
+    
+     if (log(runif(1)) < min(((dnorm(newtheta5,2,5, log = T) + likelihood_choice_withFloor(theta1[i],theta2[i],theta3[i],theta4[i],newtheta5)) -(dnorm(currenttheta4,2,5, log = T) + likelihood_choice_withFloor(theta1[i],theta2[i],theta3[i],theta4[i],currenttheta5))),0)) {
+       theta5[i] <- newtheta5
+     } else {
+       theta5[i] <- currenttheta5
+     }
+      
+  }
+  return(list(theta1 = theta1,theta2 = theta2,theta3 = theta3,theta4 = theta4, theta5 = theta5))
+}
+
+```
+
+
+
+```{r}
+choiceWithfloor <- sampler_choice_withFloor(30000,0,0,0,0,0,0.035,0.03,0.1,0.6,0.7)
+#saveRDS(choiceWithfloor,"C:/Users/anton/Documents/Bologna/Tesi_estero/30000iter_ChoiceSocialWithFloor.RData")
+# readRDS(choiceWithInertia,"C:/Users/anton/Documents/Bologna/Tesi_estero/1000iter_object_choicewithInertia_Covid.RData")
+#choiceWithInertia <- readRDS("C:/Users/anton/Documents/Bologna/Tesi_estero/5.RData")
+#choiceWithInertia <- readRDS("C:/Users/anton/Documents/Bologna/Tesi_estero/1000iter_object_choicewithInertia_Covid.RData")
+
+trace_choiceWithFloor <- matrix(unlist(choiceWithfloor,use.names = FALSE),ncol=5, dimnames = list(NULL,c('theta1', 'theta2','theta3','theta4','theta5')))
+library(coda)
+trace_choiceWithFloor <- as.mcmc(trace_choiceWithFloor)
+#summary of the results
+summary(trace_choiceWithFloor)
+
+#acceptance rate
+acceptanceRate_SocialEvolution <- 1 - rejectionRate(trace_choiceWithFloor)
+acceptanceRate_SocialEvolution
+
+effectiveSize(trace_choiceWithFloor)
+
+plot(trace_choiceWithFloor)
+
+library(fitR)
+trace_choiceWithFloo_burned <- burnAndThin(trace_choiceWithFloor, burn = 1000)
+plot(trace_choiceWithFloo_burned)
+
+
+autocorr.plot(trace_choiceWithFloor)
+
+
+```
+
+
+### COVID with introduction of Daegu and other major cities
+
+
+
+
+```{r,  cache = TRUE}
+patient_route <- read.csv("~/Bologna/Tesi_Estero/dati covid korea/PatientRoute.csv",stringsAsFactors = F)
+patient_route$patient_id <- format(patient_route$patient_id, scientific=F)
+head(patient_route)
+```
+
+```{r, cache=TRUE}
+patient <- read.csv("~/Bologna/Tesi_Estero/dati covid korea/PatientInfo.csv",stringsAsFactors = FALSE)
+patient$patient_id <- format(patient$patient_id, scientific=F)
+head(patient)
+```
+
+
+### Network Construction
+
+The network can be created by considering the nodes as the cities inside the districts, meaning that I want to have the information detailed at the smallest level possible and then I have the edges implying the movement from one city to the other. (REMARK: I have to consider the combination between province and city since the same city name can be found in different provinces due to korean configuration.) 
+As per the time of diffusion of the edges I have the detail date when the patient has done the movement.
+
+
+```{r, cache=TRUE }
+patient_nodes <- patient[,c('patient_id','sex','birth_year','province','city')]
+patient_nodes$label<-paste(patient_nodes$province, '-',patient_nodes$city)
+head(patient_nodes)
+```
+I extract the patient_id, date, city and type from the patient_route dataset. This will consitute the edges of my network. 
+
+
+```{r, cache=TRUE}
+patient_route_edges <- patient_route[,c('patient_id','date','province','city','type','latitude','longitude')]
+patient_route_edges$label <- paste(patient_route_edges$province,'-',patient_route_edges$city)
+head(patient_route_edges)
+```
+To make it more readable I have to include the origin of each patient into the edge dataset. 
+
+
+
+```{r, cache=TRUE}
+patient_edges <- merge(patient_nodes[,c('patient_id','label')],patient_route_edges, by='patient_id',all.y =TRUE)
+head(patient_edges)
+i=2
+while(i < nrow(patient_edges)){
+  if (patient_edges[max(i-1,1),1] == patient_edges[i,1]) {
+    patient_edges$label.x[i] = patient_edges$label.y[i-1]
+    i = i+1
+  } else {
+    i = i+1
+  }
+}
+head(patient_edges)
+names(patient_edges)[2] <- "label.origin"
+names(patient_edges)[9] <- "label.destination"
+names(patient_edges)[7] <- "latitude.destination"
+names(patient_edges)[8] <- "longitude.destination"
+```
+
+```{r, cache = TRUE}
+patient_edges_noloops <- patient_edges
+str(patient_edges_noloops)
+patient_edges_noloops <- patient_edges_noloops[!(patient_edges_noloops$label.origin == patient_edges_noloops$label.destination), ]
+```
+
+```{r, cache=TRUE}
+patient_edges_final <- cbind(patient_edges,increment=1)
+patient_edges_noloops_final <- cbind(patient_edges_noloops, increment = 1)
+head(patient_edges_noloops_final)
+```
+
+```{r, cache=TRUE}
+nodi <- unique(patient_nodes['label'])
+nrow(nodi)
+```
+
+rename the edges dataset and order it by date.
+
+```{r, cache=TRUE}
+head(patient_edges_noloops_final)
+names(patient_edges_noloops_final)[2] <- "sender"
+names(patient_edges_noloops_final)[9] <- "receiver"
+names(patient_edges_noloops_final)[3] <- "time"
+collegamenti <- patient_edges_noloops_final[,c('sender','receiver','time','increment')]
+rownames(collegamenti) <- 1:nrow(collegamenti)
+collegamenti <- collegamenti[order(collegamenti$time),]
+
+original_times <- collegamenti$time
+
+# collegamenti$time <- as.Date(collegamenti$time)
+# collegamenti$time <- as.numeric(collegamenti$time)
+collegamenti <- collegamenti[order(collegamenti$time),]
+rownames(collegamenti) <- 1:nrow(collegamenti)
+
+
+
+
+
+```
+
+
+```{r}
+collegamenti2 <- patient_edges_noloops_final[,c('sender','receiver','time','increment','type')]
+
+collegamenti2 <- collegamenti2[order(collegamenti2$time),]
+
+
+original_times <- collegamenti2$time
+
+collegamenti2$time <- as.Date(collegamenti2$time)
+collegamenti2$time <- as.numeric(collegamenti2$time)
+collegamenti2 <- collegamenti2[order(collegamenti2$time),]
+rownames(collegamenti2) <- 1:nrow(collegamenti2)
+
+
+x <- diff(collegamenti2$time)
+x <- append(x, 0, after = 0)
+x <- cumsum(x)
+collegamenti2$time <- x
+
+for (i in seq_len(length(collegamenti2$time))){
+  collegamenti2$time[i] <- collegamenti2$time[i] + abs(rnorm(1,0,0.1))
+}
+
+
+collegamenti2 <- collegamenti2[order(collegamenti2$time),]
+rownames(collegamenti2) <- 1:nrow(collegamenti2)
+
+```
+
+I make the times of the dataset numeric
+
+```{r, cache = TRUE}
+collegamenti$time <- as.Date(collegamenti$time)
+collegamenti$time <- as.numeric(collegamenti$time)
+```
+I take the timespans of the dataset by subtracting each consecutive row and then cumulatively summing them.
+
+```{r, cache = TRUE}
+x <- diff(collegamenti$time)
+x <- append(x, 0, after = 0)
+x <- cumsum(x)
+collegamenti$time <- x
+
+for (i in seq_len(length(collegamenti$time))){
+  collegamenti$time[i] <- collegamenti$time[i] + abs(rnorm(1,0,0.1))
+}
+
+
+collegamenti <- collegamenti[order(collegamenti$time),]
+rownames(collegamenti) <- 1:nrow(collegamenti)
+collegamenti_Covid <- collegamenti
+
+write.csv(collegamenti_Covid,"C:/Users/anton/PycharmProjects/lezioni_ronchieri/data/pippo.csv", row.names = FALSE)
+```
+
+
+
+I add the receivers nodes to the node set. 
+
+```{r, cache=TRUE}
+receiver_to_add <- as.data.frame(unique(collegamenti$receiver))
+missing <- setdiff(receiver_to_add$`unique(collegamenti$receiver)`,nodi$label)
+missing <- as.data.frame(missing)
+names(missing) <- 'label'
+nodi <- rbind(nodi,missing)
+nodi <- as.data.frame(nodi)
+rownames(nodi) <- 1:nrow(nodi)
+rownames(unique(nodi))
+nodi_Covid <- nodi
+```
+
+
+
+
+I define the objects for the DyNAM model
+
+```{r, cache=TRUE}
+
+defineNodes(nodes = nodi)
+
+Network1 <- defineNetwork(nodes=nodi)
+Network1
+Network <- linkEvents(x = Network1,changeEvents = collegamenti, nodes = nodi)
+Network
+dependent_events <- defineDependentEvents(events = collegamenti, nodes = nodi, defaultNetwork = Network)
+
+```
+
+## DyNAM rate
+
+
+```{r, cache = TRUE}
+unique_times <- unique(collegamenti$time)
+```
+
+```{r, cache = TRUE}
+#Compute the Indegree for the Covid dataset. 
+Indeg_Covid <- Indegree(Network,unique_times,0.0000000001)
+Indeg_Covid <- as.matrix(Indeg_Covid)
+Indeg <- Indeg_Covid
+
+Outdeg_Covid <- Outdegree(Network,unique_times,0.0000000001)
+Outdeg_Covid <- as.matrix(Outdeg_Covid)
+Outdeg <- Outdeg_Covid
+
+
+Inertia_Covid <- Inertia(Network,unique_times,0.0000000001)
+Ine <- Inertia_Covid
+```
+
+
+
+## COVID, RATE, INTERCEPT, INDEGREE, OUTDEGREE, SEOUL, BUSAN, INCHEON, DAEGU
+```{r}
+
+collegamenti$senderSeoul <- as.integer(startsWith(collegamenti$sender, 'Seoul'))
+collegamenti$receiverSeoul <- as.integer(startsWith(collegamenti$receiver, 'Seoul'))
+collegamenti$senderBusan <- as.integer(startsWith(collegamenti$sender , 'Busan'))
+collegamenti$receiverBusan <- as.integer(startsWith(collegamenti$receiver , 'Busan'))
+collegamenti$senderIncheon <- as.integer(startsWith(collegamenti$sender , 'Incheon'))
+collegamenti$receiverIncheon <- as.integer(startsWith(collegamenti$receiver , 'Incheon'))
+collegamenti$senderDaegu <- as.integer(startsWith(collegamenti$sender , 'Daegu'))
+collegamenti$receiverDaegu <- as.integer(startsWith(collegamenti$receiver , 'Daegu'))
+
+View(collegamenti)
+i = 5
+City <- function(x,y){
+  ActiveObjective <- which(y[,1] == 1)
+  City <-  matrix(0,nrow = nrow(nodi),ncol = nrow(collegamenti))
+  City[ActiveObjective,1] <- as.integer(x[1] == 1)
+  for (i in 2:nrow(collegamenti)){
+    ActiveObjective <- which(y[,i] - y[,i-1] == 1)
+    City[ActiveObjective,i] <- as.integer(x[i] == 1)
+    City[,i] <- ifelse((City[,i] + City[,i-1])>0,(City[,i] + City[,i-1])/(City[,i] + City[,i-1]),City[,i] + City[,i-1])
+  }
+  return(City)
+}
+Seoul_sender <- City(collegamenti$senderSeoul,Outdeg)
+View(Seoul_sender)
+
+Seoul_receiver <- City(collegamenti$receiverSeoul,Indeg)
+View(Seoul_receiver)
+
+Busan_sender <- City(collegamenti$senderBusan,Outdeg)
+Busan_receiver <- City(collegamenti$receiverBusan,Indeg)
+
+Incheon_sender <- City(collegamenti$senderIncheon,Outdeg)
+Incheon_receiver <- City(collegamenti$receiverIncheon,Indeg)
+
+Daegu_sender <- City(collegamenti$senderDaegu,Outdeg)
+Daegu_receiver <- City(collegamenti$receiverDaegu,Indeg)
+```
+
+
+```{r}
+ratesums <- c()
+timestamp <- c()
+singleLikelihoods <- c()
+likelihood_RateSeoul <- function(beta0,beta1,beta2,beta3,beta4,beta5,beta6){
+  #objectiveFunctionOfSender[i] <- sum(beta0 + beta1*Indegree[j,ActiveObjective])
+  objectiveFunctions <- beta0 + beta1*Indeg +beta2*Outdeg +beta3*Seoul_sender + beta4*Busan_sender +beta5*Incheon_sender + beta6*Daegu_sender
+  rates <- exp(objectiveFunctions)
+  ActiveObjective <- which(Outdeg[,1] == 1)
+  ratesums[1] <- sum(rates[,1])
+  timestamp[1] <- unique_times[1]
+  singleLikelihoods[1] <- sum(beta0+ beta1*Indeg[ActiveObjective,1] +beta2*Outdeg[ActiveObjective,1]+beta3*Seoul_sender[ActiveObjective,1]+beta4*Busan_sender[ActiveObjective,1] + beta5*Incheon_sender[ActiveObjective,1] + beta6*Daegu_sender[ActiveObjective,1]) - timestamp[1]*ratesums[1] 
+  for (j in 2:length(unique_times)){
+    ActiveObjective <- which(Outdeg[,j] - Outdeg[,j-1] == 1)
+    ratesums[j] <- sum(rates[,j])
+    timestamp[j] <- (unique_times[j] - unique_times[j-1])
+    singleLikelihoods[j] <- sum(beta0 + beta1*Indeg[ActiveObjective,j] +beta2*Outdeg[ActiveObjective,j]+beta3*Seoul_sender[ActiveObjective,j]+beta4*Busan_sender[ActiveObjective,j] + beta5*Incheon_sender[ActiveObjective,j] + beta6*Daegu_sender[ActiveObjective,j]) - timestamp[j]*ratesums[j] 
+  }
+  logL <- sum(singleLikelihoods)
+  return(logL)
+}
+
+sampler_RateSeoul <- function(niter,beta0startval,beta1startval,beta2startval,beta3startval,beta4startval,beta5startval,beta6startval,beta0proposalsd,beta1proposalsd,beta2proposalsd,beta3proposalsd,beta4proposalsd,beta5proposalsd,beta6proposalsd) {
+  beta0 <- rep(0,niter)
+  beta1 <- rep(0,niter)
+  beta2 <- rep(0,niter)
+  beta3 <- rep(0,niter)
+  beta4 <- rep(0,niter)
+  beta5 <- rep(0,niter)
+  beta6 <- rep(0,niter)
+  beta0[1] <- beta0startval
+  beta1[1] <- beta1startval
+  beta2[1] <- beta2startval
+  beta3[1] <- beta3startval
+  beta4[1] <- beta4startval
+  beta5[1] <- beta5startval
+  beta6[1] <- beta6startval
+  
+  for (i in 2:niter) {
+    currentbeta0 <- beta0[i - 1]
+    currentbeta1 <- beta1[i - 1]
+    currentbeta2 <- beta2[i - 1]
+    currentbeta3 <- beta3[i - 1]
+    currentbeta4 <- beta3[i - 1]
+    currentbeta5 <- beta3[i - 1]
+    currentbeta6 <- beta3[i - 1]
+    newbeta0 <- currentbeta0 + rnorm(1, 0, beta0proposalsd)
+    
+    A<- min(((dnorm(newbeta0,-4,2, log = T) + likelihood_RateSeoul(newbeta0,currentbeta1,currentbeta2,currentbeta3,currentbeta4,currentbeta5,currentbeta6)) - (dnorm(currentbeta0,-4,2, log=T) + likelihood_RateSeoul(currentbeta0,currentbeta1,currentbeta2,currentbeta3,currentbeta4,currentbeta5,currentbeta6))),0)
+
+    if (log(runif(1)) < A) {
+      beta0[i] <- newbeta0
+    } else {
+      beta0[i] <- currentbeta0
+    }
+    newbeta1 <- currentbeta1 + rnorm(1, 0, beta1proposalsd)
+    
+    A<- min(((dnorm(newbeta1,0,4, log = T) + likelihood_RateSeoul(beta0[i],newbeta1,currentbeta2,currentbeta3,currentbeta4,currentbeta5,currentbeta6)) - (dnorm(currentbeta1,0,4, log = T) + likelihood_RateSeoul(beta0[i],currentbeta1,currentbeta2,currentbeta3,currentbeta4,currentbeta5,currentbeta6))),0)
+    
+    if (log(runif(1)) < A) {
+      beta1[i] <- newbeta1
+    } else {
+      beta1[i] <- currentbeta1
+    }
+    
+    newbeta2 <- currentbeta2 + rnorm(1, 0, beta2proposalsd)
+    
+    A<- min(((dnorm(newbeta2,0,4, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],newbeta2,currentbeta3,currentbeta4,currentbeta5,currentbeta6)) - (dnorm(currentbeta2,0,4, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],currentbeta2,currentbeta3,currentbeta4,currentbeta5,currentbeta6))),0)
+    
+    if (log(runif(1)) < A) {
+      beta2[i] <- newbeta2
+    } else {
+      beta2[i] <- currentbeta2
+    }
+    
+     newbeta3 <- currentbeta3 + rnorm(1, 0, beta3proposalsd)
+    
+    A<- min(((dnorm(newbeta3,4,2, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],beta2[i],newbeta3,currentbeta4,currentbeta5,currentbeta6)) - (dnorm(currentbeta3,4,2, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],beta2[i],currentbeta3,currentbeta4,currentbeta5,currentbeta6))),0)
+    
+    if (log(runif(1)) < A) {
+      beta3[i] <- newbeta3
+    } else {
+      beta3[i] <- currentbeta3
+    }
+    
+     newbeta4 <- currentbeta4 + rnorm(1, 0, beta4proposalsd)
+    
+    A<- min(((dnorm(newbeta4,4,2, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],beta2[i],beta3[i],newbeta4,currentbeta5,currentbeta6)) - (dnorm(currentbeta4,4,2, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],beta2[i],beta3[i],currentbeta4,currentbeta5,currentbeta6))),0)
+    
+    if (log(runif(1)) < A) {
+      beta4[i] <- newbeta4
+    } else {
+      beta4[i] <- currentbeta4
+    }
+    
+     newbeta5 <- currentbeta5 + rnorm(1, 0, beta5proposalsd)
+    
+    A<- min(((dnorm(newbeta5,4,2, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],beta2[i],beta3[i],beta4[i],newbeta5,currentbeta6)) - (dnorm(currentbeta5,4,2, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],beta2[i],beta3[i],beta4[i],currentbeta5,currentbeta6))),0)
+    
+    if (log(runif(1)) < A) {
+      beta5[i] <- newbeta5
+    } else {
+      beta5[i] <- currentbeta5
+    }
+    
+     newbeta6 <- currentbeta6 + rnorm(1, 0, beta6proposalsd)
+    
+    A<- min(((dnorm(newbeta6,4,2, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],beta2[i],beta3[i],beta4[i],beta5[i],newbeta6)) - (dnorm(currentbeta6,4,2, log = T) + likelihood_RateSeoul(beta0[i],beta1[i],beta2[i],beta3[i],beta4[i],beta5[i],currentbeta6))),0)
+    
+    if (log(runif(1)) < A) {
+      beta6[i] <- newbeta6
+    } else {
+      beta6[i] <- currentbeta6
+    }
+    
+  }
+  
+  
+  
+  return(list(beta0 = beta0,beta1 = beta1,beta2 = beta2,beta3 = beta3, beta4 = beta4, beta5=beta5,beta6=beta6)) # return a "list" with two elements named beta0 and beta1
+}
+
+```
+
+```{r}
+rate_CovidSeoul <- sampler_RateSeoul(30000,-3,0,0,0,0,0,0,0.07,0.0018,0.0009,0.15,10.5,3.5,13.5)
+#saveRDS(rate_CovidSeoul,"C:/Users/anton/Documents/Bologna/Tesi_estero/30000iter_RateCovidWithSeoul.RData")
+
+
+trace_rate_CovidSeoul <- matrix(unlist(rate_CovidSeoul,use.names = FALSE),ncol=7, dimnames = list(NULL,c('beta0','beta1','beta2','beta3','beta4','beta5','beta6')))
+
+trace_rate_CovidSeoul <- as.mcmc(trace_rate_CovidSeoul)
+
+#summary of the results
+summary(trace_rate_CovidSeoul)
+
+#acceptance rate
+acceptanceRate <- 1 - rejectionRate(trace_rate_CovidSeoul)
+acceptanceRate
+
+effectiveSize(trace_rate_CovidSeoul)
+
+plot(trace_rate_CovidSeoul)
+autocorr.plot(trace_rate_CovidSeoul)
+
+
+trace_rate_CovidSeoul_burned <- burnAndThin(trace_rate_CovidSeoul, burn = 1000)
+plot(trace_rate_CovidSeoul_burned)
+
+
+```
+
+
+
+### choice, outdeg, indeg, ine per major city
+
+```{r}
+
+utility_log <- c()
+denominator_log <- c()
+singlelikelihoods_choice <- c()
+likelihood_choice_Seoul <- function(theta1,theta2,theta3, theta4,theta5,theta6,theta7,theta8,theta9){
+  ActiveReceiver <- which(Indeg[,1]  == 1)
+  ActiveSender <- which(Outdeg[,1]  == 1)
+  utility_log[1] <- theta1*Outdeg[ActiveSender,1] + theta2*Indeg[ActiveSender,1]+theta3*Ine[[1]][ActiveSender,ActiveReceiver] +(theta4*Outdeg[ActiveSender,1]+theta5*Indeg[ActiveSender,1]+theta6*Ine[[1]][ActiveSender,ActiveReceiver])*(collegamenti$senderSeoul[ActiveSender]*collegamenti$receiverSeoul[ActiveReceiver])+theta7*Ine[[1]][ActiveSender,ActiveReceiver]*(collegamenti$senderBusan[ActiveSender]*collegamenti$receiverBusan[ActiveReceiver])+theta8*Ine[[1]][ActiveSender,ActiveReceiver]*(collegamenti$senderDaegu[ActiveSender]*collegamenti$receiverDaegu[ActiveReceiver])+theta9*Ine[[1]][ActiveSender,ActiveReceiver]*(collegamenti$senderIncheon[ActiveSender]*collegamenti$receiverIncheon[ActiveReceiver])
+  
+  denominator_log[1] <- log(sum(exp(theta1*Outdeg[-ActiveSender,1] + theta2*Indeg[                                                                                    -ActiveSender,1] + theta3*Ine[[1]][ActiveSender,-ActiveSender]  +(theta4*Outdeg[-ActiveSender,1]+theta5*Indeg[-ActiveSender,1]+theta6*Ine[[1]][ActiveSender,-ActiveSender])*(Seoul_sender[ActiveSender,1]* Seoul_receiver[-ActiveSender,1])+theta7*Ine[[1]][ActiveSender,-ActiveSender]*(Busan_sender[ActiveSender,1]* Busan_receiver[-ActiveSender,1])+theta8*Ine[[1]][ActiveSender,-ActiveSender]*(Daegu_sender[ActiveSender,1]* Daegu_receiver[-ActiveSender,1])+theta9*Ine[[1]][ActiveSender,-ActiveSender]*(Incheon_sender[ActiveSender,1]* Incheon_receiver[-ActiveSender,1])))) 
+  singlelikelihoods_choice[1] <- utility_log[1] - denominator_log[1]
+  for (j in 2:length(unique_times)){
+    ActiveReceiver <- which(Indeg[,j] - Indeg[,j-1] == 1)
+    ActiveSender <- which(Outdeg[,j] - Outdeg[,j-1] == 1)
+    utility_log[j] <- theta1*Outdeg[ActiveSender,j] + theta2*Indeg[ActiveSender,j] +theta3*Ine[[j]][ActiveSender,ActiveReceiver] +(theta4*Outdeg[ActiveSender,j]+theta5*Indeg[ActiveSender,j]+theta6*Ine[[j]][ActiveSender,ActiveReceiver])*(collegamenti$senderSeoul[ActiveSender]*collegamenti$receiverSeoul[ActiveReceiver])+theta7*Ine[[j]][ActiveSender,ActiveReceiver]*(collegamenti$senderBusan[ActiveSender]*collegamenti$receiverBusan[ActiveReceiver])+theta8*Ine[[j]][ActiveSender,ActiveReceiver]*(collegamenti$senderDaegu[ActiveSender]*collegamenti$receiverDaegu[ActiveReceiver])+theta9*Ine[[j]][ActiveSender,ActiveReceiver]*(collegamenti$senderIncheon[ActiveSender]*collegamenti$receiverIncheon[ActiveReceiver])
+    denominator_log[j] <- log(sum(exp(theta1*Outdeg[-ActiveSender,j] + theta2*Indeg[                                                                                        -ActiveSender,j]+ theta3*Ine[[j]][ActiveSender,-ActiveSender] +(theta4*Outdeg[-ActiveSender,j]+theta5*Indeg[-ActiveSender,j]+theta6*Ine[[j]][ActiveSender,-ActiveSender])*(Seoul_sender[ActiveSender,j]* Seoul_receiver[-ActiveSender,j])+theta7*Ine[[j]][ActiveSender,-ActiveSender]*(Busan_sender[ActiveSender,j]* Busan_receiver[-ActiveSender,j])+theta8*Ine[[j]][ActiveSender,-ActiveSender]*(Daegu_sender[ActiveSender,j]* Daegu_receiver[-ActiveSender,j])+theta9*Ine[[j]][ActiveSender,-ActiveSender]*(Incheon_sender[ActiveSender,j]* Incheon_receiver[-ActiveSender,j]))))
+    singlelikelihoods_choice[j] <- utility_log[j] - denominator_log[j]
+  }
+  logL_choice <- sum(singlelikelihoods_choice)
+  return(logL_choice)
+}
+
+
+
+sampler_choiceSeoul <- function(niter, theta1startval, theta2startval,theta3startval, theta4startval,theta5startval,theta6startval,theta7startval,theta8startval,theta9startval, theta1proposalsd,theta2proposalsd,theta3proposalsd, theta4proposalsd,theta5proposalsd,theta6proposalsd,theta7proposalsd,theta8proposalsd,theta9proposalsd){
+  theta1 <- rep(0,niter)
+  theta2 <- rep(0,niter)
+  theta3 <- rep(0,niter)
+  theta4 <- rep(0,niter)
+  theta5 <- rep(0,niter)
+  theta6 <- rep(0,niter)
+  theta7 <- rep(0,niter)
+  theta8 <- rep(0,niter)
+  theta9 <- rep(0,niter)
+  theta1[1] <- theta1startval
+  theta2[1] <- theta2startval
+  theta3[1] <- theta3startval
+  theta4[1] <- theta4startval
+  theta5[1] <- theta5startval
+  theta6[1] <- theta6startval
+  theta7[1] <- theta7startval
+  theta8[1] <- theta8startval
+  theta9[1] <- theta9startval
+
+
+
+  for (i in 2:niter) {
+    currenttheta1 <- theta1[i - 1]
+    currenttheta2 <- theta2[i - 1]
+    currenttheta3 <- theta3[i - 1]
+    currenttheta4 <- theta4[i - 1]
+    currenttheta5 <- theta5[i - 1]
+    currenttheta6 <- theta6[i - 1]
+    currenttheta7 <- theta7[i - 1]
+    currenttheta8 <- theta8[i - 1]
+    currenttheta9 <- theta9[i - 1]
+
+    newtheta1 <- currenttheta1 + rnorm(1, 0, theta1proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta1,0,2, log = T) + likelihood_choice_Seoul(newtheta1,currenttheta2,currenttheta3, currenttheta4,currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9))-(dnorm(currenttheta1,0,2, log=T) + likelihood_choice_Seoul(currenttheta1,currenttheta2,currenttheta3,currenttheta4,currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9))),0)) {
+      theta1[i] <- newtheta1
+    } else {
+      theta1[i] <- currenttheta1
+    }
+    newtheta2 <- currenttheta2 + rnorm(1, 0, theta2proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta2,0,2, log = T) + likelihood_choice_Seoul(theta1[i],newtheta2,currenttheta3,currenttheta4,currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9)) -(dnorm(currenttheta2,0,2, log = T) + likelihood_choice_Seoul(theta1[i],currenttheta2,currenttheta3,currenttheta4,currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9))),0)) {
+      theta2[i] <- newtheta2
+    } else {
+      theta2[i] <- currenttheta2
+    }
+
+    newtheta3 <- currenttheta3 + rnorm(1, 0, theta3proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta3,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],newtheta3,currenttheta4,currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9)) -(dnorm(currenttheta3,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],currenttheta3,currenttheta4,currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9))),0)) {
+      theta3[i] <- newtheta3
+    } else {
+      theta3[i] <- currenttheta3
+    }
+    
+    newtheta4 <- currenttheta4 + rnorm(1, 0, theta4proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta4,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],newtheta4,currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9)) -(dnorm(currenttheta4,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],currenttheta4,currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9))),0)) {
+      theta4[i] <- newtheta4
+    } else {
+      theta4[i] <- currenttheta4
+    }
+    
+    newtheta5 <- currenttheta5 + rnorm(1, 0, theta5proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta5,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],newtheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9)) -(dnorm(currenttheta5,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],currenttheta5,currenttheta6,currenttheta7,currenttheta8,currenttheta9))),0)) {
+      theta5[i] <- newtheta5
+    } else {
+      theta5[i] <- currenttheta5
+    }
+    
+    newtheta6 <- currenttheta6 + rnorm(1, 0, theta6proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta6,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],theta5[i],newtheta6,currenttheta7,currenttheta8,currenttheta9)) -(dnorm(currenttheta6,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],theta5[i],currenttheta6,currenttheta7,currenttheta8,currenttheta9))),0)) {
+      theta6[i] <- newtheta6
+    } else {
+      theta6[i] <- currenttheta6
+    }
+    
+    newtheta7 <- currenttheta7 + rnorm(1, 0, theta7proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta7,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],theta5[i],theta6[i],newtheta7,currenttheta8,currenttheta9)) -(dnorm(currenttheta7,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],theta5[i],theta6[i],currenttheta7,currenttheta8,currenttheta9))),0)) {
+      theta7[i] <- newtheta7
+    } else {
+      theta7[i] <- currenttheta7
+    }
+      
+      newtheta8 <- currenttheta8 + rnorm(1, 0, theta8proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta8,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],theta5[i],theta6[i],theta7[i],newtheta8,currenttheta9)) -(dnorm(currenttheta8,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],theta5[i],theta6[i],theta7[i],currenttheta8,currenttheta9))),0)) {
+      theta8[i] <- newtheta8
+    } else {
+      theta8[i] <- currenttheta8
+    }
+      
+      newtheta9 <- currenttheta9 + rnorm(1, 0, theta9proposalsd)
+
+    if (log(runif(1)) < min(((dnorm(newtheta9,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],theta5[i],theta6[i],theta7[i],theta8[i],newtheta9)) -(dnorm(currenttheta9,0,2, log = T) + likelihood_choice_Seoul(theta1[i],theta2[i],theta3[i],theta4[i],theta5[i],theta6[i],theta7[i],theta8[i],currenttheta9))),0)) {
+      theta9[i] <- newtheta9
+    } else {
+      theta9[i] <- currenttheta9
+    }
+  }
+  return(list(theta1 = theta1,theta2 = theta2,theta3 = theta3, theta4 = theta4, theta5 = theta5, theta6 = theta6, theta7 = theta7, theta8 = theta8, theta9 = theta9))
+}
+```
+
+
+```{r}
+choice_CovidSeoul <- sampler_choiceSeoul(30000,0,0,5,0,0,0,0,0,0,0.0009,0.0009,0.01,0.005,0.007,0.05,4,0.3,0.7)
+
+trace_choice_CovidSeoul <- matrix(unlist(choice_CovidSeoul,use.names = FALSE),ncol=9, dimnames = list(NULL,c('theta1','theta2','theta3','theta4','theta5','theta6','theta7','theta8','theta9')))
+
+trace_choice_CovidSeoul <- as.mcmc(trace_choice_CovidSeoul)
+
+#summary of the results
+summary(trace_choice_CovidSeoul)
+
+#acceptance rate
+acceptanceRate <- 1 - rejectionRate(trace_choice_CovidSeoul)
+acceptanceRate
+
+effectiveSize(trace_choice_CovidSeoul)
+
+plot(trace_choice_CovidSeoul)
+autocorr.plot(trace_choice_CovidSeoul)
+
+```
+
+```{r}
+trace_choice_CovidSeoul_burned <- burnAndThin(trace_choice_CovidSeoul, burn = 3000)
+plot(trace_choice_CovidSeoul_burned)
+
+
+```
+
+
+
