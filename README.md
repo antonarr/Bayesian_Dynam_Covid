@@ -1,2 +1,2 @@
 # Bayesian_Dynam_Covid
-Bayesian Dynam Soth Korean Patient movement code
+Bayesian Dynam South Korean Patient movement code
